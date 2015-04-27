@@ -1,121 +1,245 @@
 'use strict';
 
+var async = require('async');
+var cuid = require('cuid');
 var debug = require('debug')('mdns-swarm');
 var events = require('events');
+var ip = require('ipv6');
 var mdns = require('mdns');
-var net = require('net');
-var os = require('os');
+var once = require('once');
+var request = require('request');
+var SimplePeer = require('simple-peer');
+var signalServer = require('./signal-server.js');
 var util = require('util');
+var wrtc = require('wrtc');
+var _ = require('lodash');
 
-function Server(cb, connectionCb) {
-  var self = this;
+// a fingerprint of the user's machine
+var me = cuid();
 
-  var server = net.createServer(function (c) {
-    console.log('new client conection from', c.remoteAddress + ':' +
-      c.remotePort);
-
-    c.on('end', function () {
-      console.log('disconnected from', c.remoteAddress + ':' + c.remotePort);
-    });
-
-    c.pipe(process.stdout);
-
-    connectionCb(c);
-  });
-
-  server.listen(0, function () {
-    self.address = server.address();
-
-    cb(self.address);
-  });
-
-  server.on('error', function (err) {
-    console.error('server error', err);
-  });
-}
-
-function id(host, port) {
-  if (!host) {
-    host = 'unknown';
-  } else if (host[host.length - 1] !== '.') {
-    host += '.';
-  }
-
-  return host + ':' + port;
-}
-
-// function idFromService(service) {
-//   return id(service.host, service.port);
-// }
-
-function Swarm(identifier, optionalCb) {
+function Swarm(identifier) {
   events.EventEmitter.call(this);
 
-  this.hostname = os.hostname();
   this.peers = [];
+  this._peers = {};
+
+  this.connectivity = {};
+
+  this.connectivityQueue = async.queue(function (task, cb) {
+    task(cb);
+  }, 1);
 
   var self = this;
 
-  this.server = new Server(function listening(address) {
-    var advertisement = mdns.createAdvertisement(mdns.tcp(identifier),
-       address.port);
+  this.on('connectivity', function (host, baseUrl) {
+    debug('connectivity event', host, baseUrl);
 
-    self.port = address.port;
-    self.id = id(self.hostname, address.port);
+    var options = {};
 
-    console.log('advertising at', self.id);
+    if (me < host) {
+      options = {initiator: true};
+    }
+
+    var peer = this._peers[host] = new SimplePeer(_.defaults(options, {wrtc: wrtc}));
+
+    peer.on('signal', function (signal) {
+      var url = baseUrl + 'signal/' + me;
+
+      debug('→ POST', url);
+
+      request.post({
+        url: url,
+        json: true,
+        body: signal
+      }, function (err, response) {
+        if (err || response.statusCode !== 200) {
+          console.error('→ POST err /signal/' + me, err,
+            response && response.statusCode);
+        }
+      });
+    });
+
+    peer.on('connect', function () {
+      debug('connected to host', host);
+
+      self.peers.push(peer);
+
+      self.emit('peer', peer, host);
+      self.emit('connection', peer, host);
+    });
+
+    var onClose = once(function () {
+      debug('peer close', host);
+
+      if (self._peers[host] === peer) {
+        delete self._peers[host];
+      }
+
+      var i = self.peers.indexOf(peer);
+
+      if (i > -1) {
+        self.peers.splice(i, 1);
+      }
+    });
+
+    peer.on('error', onClose);
+    peer.once('close', onClose);
+  });
+
+  var app = signalServer.listen(me, function onListening(port) {
+    var advertisement = mdns.createAdvertisement(
+      mdns.tcp(identifier),
+      port,
+      {txtRecord: {host: me}});
 
     advertisement.on('error', function (err) {
-      console.log('advertisement error', err);
+      console.error('advertisement error', err);
     });
 
     advertisement.start();
 
-    if (optionalCb) {
-      optionalCb();
+    debug('advertising', identifier, me);
+  }, function onSignal(host, signal) {
+    debug('signal from', host, signal.type);
+
+    if (!self._peers[host]) {
+      return debug('no peer for host', host);
     }
-  }, function connection(client) {
-    self.peers.push(client);
+
+    self._peers[host].signal(signal);
   });
+
+  if (process.env.DEBUG) {
+    app.get('/debug', function (req, res) {
+      var hosts = _.keys(self._peers);
+
+      var connections = hosts.map(function (host) {
+        return self.connectivity[host];
+      });
+
+      var mine = _.zipObject(hosts, connections);
+
+      if (req.query.all) {
+        debug('← GET /debug?all=true');
+
+        async.map(hosts, function (host, cbMap) {
+          debug('→ GET /debug', host);
+
+          request.get({
+            url: self.connectivity[host] + 'debug',
+            json: true
+          }, function (err, response, body) {
+            var result = {host: host};
+
+            if (err || !body) {
+              result.connections = self.connectivity[host];
+            } else {
+              result.connections = body;
+            }
+
+            cbMap(null, result);
+          });
+        }, function (err, results) {
+          if (err) {
+            return res.send({error: err});
+          }
+
+          var resultsObject = _.zipObject(_.pluck(results, 'host'),
+                                          _.pluck(results, 'connections'));
+
+
+          resultsObject[me] = mine;
+
+          res.send(resultsObject);
+        });
+
+        return;
+      }
+
+      debug('← GET /debug');
+
+      res.send(mine);
+    });
+  }
 
   var browser = mdns.createBrowser(mdns.tcp(identifier));
 
   browser.on('error', function (err) {
-    console.log('browser error', err);
+    console.error('browser error', err);
   });
 
   browser.on('serviceUp', function (service) {
-    var serviceId = id(service.host, service.port);
+    var host = service.txtRecord && service.txtRecord.host;
 
-    console.log('service up', serviceId);
+    if (!host) {
+      debug('skipping, no host');
 
-    if (self.id === serviceId) {
-      return debug('not connecting to my own advertisement');
+      return;
     }
 
-    if (self.id > serviceId) {
-      return debug('not connecting to a lower-id host');
+    if (me === host) {
+      return;
     }
 
-    var client = net.connect({
-      port: service.port,
-      family: service.family,
-      host: service.host
-    });
+    debug('service up', service.addresses, service.host, service.port, host);
 
-    client.on('connect', function () {
-      self.emit('peer', client, serviceId);
-    });
+    service.addresses.forEach(function (address) {
+      self.connectivityQueue.push(function (cb) {
+        if (self.connectivity[host]) {
+          return cb();
+        }
 
-    client.on('error', function (err) {
-      console.error('client error', err);
-    });
+        var v6 = new ip.v6.Address(address);
 
-    self.peers.push(client);
+        var hostBase;
+
+        if (v6.isValid()) {
+          if (v6.getScope() !== 'Global') {
+            debug('using hostname in favor of scoped IPv6 address');
+
+            hostBase = 'http://' + service.host + ':' + service.port + '/';
+          } else {
+            hostBase = v6.href(service.port);
+          }
+        } else {
+          hostBase = 'http://' + address + ':' + service.port + '/';
+        }
+
+        var url = hostBase + 'connectivity';
+
+        debug('→ GET', url);
+
+        request.get({url: url, json: true}, function (err, response, body) {
+          if (err) {
+            console.error('→ GET err /connectivity', err);
+
+            return cb();
+          }
+
+          if (body.host !== host) {
+            console.error('→ GET /connectivity host mismatch', body.host,
+              '!==', host);
+
+            return cb();
+          }
+
+          debug('host', host, 'is accessible via', hostBase);
+
+          self.connectivity[host] = hostBase;
+
+          self.emit('connectivity', host, hostBase);
+
+          debug('reponse', response.statusCode);
+
+          cb();
+        });
+      });
+    });
   });
 
+  // XXX: the metadata we get here is not specific enough to do anything with
   // browser.on('serviceDown', function (service) {
-  //   self.emit('peer-gone', service, idFromService(service));
+  //   debug('peer-gone', service);
   // });
 
   browser.start();
@@ -125,7 +249,7 @@ util.inherits(Swarm, events.EventEmitter);
 
 Swarm.prototype.send = function (message) {
   this.peers.forEach(function (peer) {
-    peer.write(message);
+    peer.send(message);
   });
 };
 
