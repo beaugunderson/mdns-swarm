@@ -1,0 +1,33 @@
+{
+  "name": "mdns-swarm",
+  "version": "1.0.0",
+  "description": "Create a swarm of p2p connections using mDNS",
+  "main": "mdns-swarm.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "bin": {
+    "simple-swarm": "./simple-swarm.js"
+  },
+  "keywords": [
+    "mdns",
+    "swarm",
+    "p2p"
+  ],
+  "author": "Beau Gunderson <beau@beaugunderson.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/beaugunderson/mdns-swarm.git"
+  },
+  "bugs": {
+    "url": "https://github.com/beaugunderson/mdns-swarm/issues"
+  },
+  "homepage": "https://github.com/beaugunderson/mdns-swarm#readme",
+  "dependencies": {
+    "chalk": "^1.0.0",
+    "debug": "^2.1.3",
+    "github-current-user": "^1.0.0",
+    "mdns": "^2.2.8"
+  }
+}
