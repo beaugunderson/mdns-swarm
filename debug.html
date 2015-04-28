@@ -42,7 +42,11 @@
         return {name: host};
       });
 
-      json.links = _.flatten(_.map(hosts, function (links, key) {
+      json.links = _.flatten(_.compact(_.map(hosts, function (links, key) {
+        if (typeof links === 'string') {
+          return;
+        }
+
         return _.map(links, function (url, link) {
           var source = _.findIndex(json.nodes, function (node) {
             return node.name === key;
@@ -60,7 +64,7 @@
 
           return {source: source, target: target};
         });
-      }));
+      })));
 
       console.log('json', json);
 

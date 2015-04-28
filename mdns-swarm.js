@@ -11,19 +11,19 @@ var request = require('request');
 var SimplePeer = require('simple-peer');
 var signalServer = require('./signal-server.js');
 var util = require('util');
-var wrtc = require('wrtc');
-var _ = require('lodash');
 
-// a fingerprint of the user's machine
-var me = cuid();
-
-function Swarm(identifier) {
+function Swarm(identifier, swarmOptions) {
   events.EventEmitter.call(this);
+
+  this.swarmOptions = swarmOptions || {};
 
   this.peers = [];
   this._peers = {};
 
   this.connectivity = {};
+
+  // a fingerprint of this host/process
+  this.id = cuid();
 
   this.connectivityQueue = async.queue(function (task, cb) {
     task(cb);
@@ -31,66 +31,11 @@ function Swarm(identifier) {
 
   var self = this;
 
-  this.on('connectivity', function (host, baseUrl) {
-    debug('connectivity event', host, baseUrl);
-
-    var options = {};
-
-    if (me < host) {
-      options = {initiator: true};
-    }
-
-    var peer = this._peers[host] = new SimplePeer(_.defaults(options, {wrtc: wrtc}));
-
-    peer.on('signal', function (signal) {
-      var url = baseUrl + 'signal/' + me;
-
-      debug('→ POST', url);
-
-      request.post({
-        url: url,
-        json: true,
-        body: signal
-      }, function (err, response) {
-        if (err || response.statusCode !== 200) {
-          console.error('→ POST err /signal/' + me, err,
-            response && response.statusCode);
-        }
-      });
-    });
-
-    peer.on('connect', function () {
-      debug('connected to host', host);
-
-      self.peers.push(peer);
-
-      self.emit('peer', peer, host);
-      self.emit('connection', peer, host);
-    });
-
-    var onClose = once(function () {
-      debug('peer close', host);
-
-      if (self._peers[host] === peer) {
-        delete self._peers[host];
-      }
-
-      var i = self.peers.indexOf(peer);
-
-      if (i > -1) {
-        self.peers.splice(i, 1);
-      }
-    });
-
-    peer.on('error', onClose);
-    peer.once('close', onClose);
-  });
-
-  var app = signalServer.listen(me, function onListening(port) {
+  var app = signalServer.listen(this.id, function onListening(port) {
     var advertisement = mdns.createAdvertisement(
       mdns.tcp(identifier),
       port,
-      {txtRecord: {host: me}});
+      {txtRecord: {host: self.id}});
 
     advertisement.on('error', function (err) {
       console.error('advertisement error', err);
@@ -98,74 +43,19 @@ function Swarm(identifier) {
 
     advertisement.start();
 
-    debug('advertising', identifier, me);
+    debug('advertising %s, %s', identifier, self.id);
   }, function onSignal(host, signal) {
-    debug('signal from', host, signal.type);
+    debug('signal from %s, %s', host, signal.type || 'no type');
 
     if (!self._peers[host]) {
-      return debug('no peer for host', host);
+      return debug('no peer for host %s', host);
     }
 
     self._peers[host].signal(signal);
   });
 
   if (process.env.DEBUG) {
-    app.get('/debug.html', function (req, res) {
-      var path = require('path');
-
-      res.sendFile(path.join(__dirname, 'debug.html'));
-    });
-
-    app.get('/debug', function (req, res) {
-      var hosts = _.keys(self._peers);
-
-      var connections = hosts.map(function (host) {
-        return self.connectivity[host];
-      });
-
-      var mine = _.zipObject(hosts, connections);
-
-      if (req.query.all) {
-        debug('← GET /debug?all=true');
-
-        async.map(hosts, function (host, cbMap) {
-          debug('→ GET /debug', host);
-
-          request.get({
-            url: self.connectivity[host] + 'debug',
-            json: true
-          }, function (err, response, body) {
-            var result = {host: host};
-
-            if (err || !body) {
-              result.connections = self.connectivity[host];
-            } else {
-              result.connections = body;
-            }
-
-            cbMap(null, result);
-          });
-        }, function (err, results) {
-          if (err) {
-            return res.send({error: err});
-          }
-
-          var resultsObject = _.zipObject(_.pluck(results, 'host'),
-                                          _.pluck(results, 'connections'));
-
-
-          resultsObject[me] = mine;
-
-          res.send(resultsObject);
-        });
-
-        return;
-      }
-
-      debug('← GET /debug');
-
-      res.send(mine);
-    });
+    require('./debug-routes.js').call(this, app);
   }
 
   var browser = mdns.createBrowser(mdns.tcp(identifier));
@@ -183,11 +73,12 @@ function Swarm(identifier) {
       return;
     }
 
-    if (me === host) {
+    if (self.id === host) {
       return;
     }
 
-    debug('service up', service.addresses, service.host, service.port, host);
+    debug('service up %j, %s, %s, %s', service.addresses, service.host,
+      service.port, host);
 
     service.addresses.forEach(function (address) {
       self.connectivityQueue.push(function (cb) {
@@ -213,7 +104,7 @@ function Swarm(identifier) {
 
         var url = hostBase + 'connectivity';
 
-        debug('→ GET', url);
+        debug('→ GET %s', url);
 
         request.get({url: url, json: true}, function (err, response, body) {
           if (err) {
@@ -229,18 +120,74 @@ function Swarm(identifier) {
             return cb();
           }
 
-          debug('host', host, 'is accessible via', hostBase);
+          debug('host %s is accessible via %s', host, hostBase);
 
           self.connectivity[host] = hostBase;
 
           self.emit('connectivity', host, hostBase);
 
-          debug('reponse', response.statusCode);
+          debug('reponse %s', response.statusCode);
 
           cb();
         });
       });
     });
+  });
+
+  this.on('connectivity', function (host, baseUrl) {
+    debug('connectivity event from %s, %s', host, baseUrl);
+
+    var options = {wrtc: self.swarmOptions.wrtc};
+
+    // only connect to hosts with IDs that sort higher
+    if (self.id < host) {
+      options.initiator = true;
+    }
+
+    var peer = this._peers[host] = new SimplePeer(options);
+
+    peer.on('signal', function (signal) {
+      var url = baseUrl + 'signal/' + self.id;
+
+      debug('→ POST: %s', url);
+
+      request.post({
+        url: url,
+        json: true,
+        body: signal
+      }, function (err, response) {
+        if (err || response.statusCode !== 200) {
+          console.error('→ POST err /signal/' + self.id, err,
+            response && response.statusCode);
+        }
+      });
+    });
+
+    peer.on('connect', function () {
+      debug('connected to host %s', host);
+
+      self.peers.push(peer);
+
+      self.emit('peer', peer, host);
+      self.emit('connection', peer, host);
+    });
+
+    var onClose = once(function () {
+      debug('peer close %s', host);
+
+      if (self._peers[host] === peer) {
+        delete self._peers[host];
+      }
+
+      var i = self.peers.indexOf(peer);
+
+      if (i > -1) {
+        self.peers.splice(i, 1);
+      }
+    });
+
+    peer.on('error', onClose);
+    peer.once('close', onClose);
   });
 
   // XXX: the metadata we get here is not specific enough to do anything with
@@ -253,10 +200,10 @@ function Swarm(identifier) {
 
 util.inherits(Swarm, events.EventEmitter);
 
-Swarm.prototype.send = function (message) {
-  this.peers.forEach(function (peer) {
-    peer.send(message);
-  });
-};
+// Swarm.prototype.send = function (message) {
+//   this.peers.forEach(function (peer) {
+//     peer.send(message);
+//   });
+// };
 
 module.exports = Swarm;
