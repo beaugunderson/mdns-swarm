@@ -110,6 +110,12 @@ function Swarm(identifier) {
   });
 
   if (process.env.DEBUG) {
+    app.get('/debug.html', function (req, res) {
+      var path = require('path');
+
+      res.sendFile(path.join(__dirname, 'debug.html'));
+    });
+
     app.get('/debug', function (req, res) {
       var hosts = _.keys(self._peers);
 
