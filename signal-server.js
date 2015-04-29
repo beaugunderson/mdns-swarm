@@ -1,22 +1,33 @@
 'use strict';
 
 var bodyParser = require('body-parser');
-var debug = require('debug')('signal-server');
 var express = require('express');
 
-exports.listen = function (me, listeningCb, signalCb) {
+exports.listen = function (listeningCb, signalCb) {
   var app = express();
 
   app.use(bodyParser.json());
 
-  app.get('/connectivity', function (req, res) {
-    debug('← GET /connectivity');
+  var self = this;
 
-    res.send({host: me});
+  app.get('/connectivity', function (req, res) {
+    self.debug('← GET /connectivity');
+
+    res.send({host: self.id});
   });
 
   app.post('/signal/:host', function (req, res) {
-    debug('← POST /signal/' + req.params.host);
+    var type = req.body.type;
+
+    if (!type) {
+      if (req.body.candidate) {
+        type = 'candidate';
+      } else {
+        type = 'unknown type';
+      }
+    }
+
+    self.debug('← POST /signal/%s %s', req.params.host, type);
 
     signalCb(req.params.host, req.body);
 
@@ -24,11 +35,7 @@ exports.listen = function (me, listeningCb, signalCb) {
   });
 
   var server = app.listen(0, function () {
-    var port = server.address().port;
-
-    debug('listening on', port);
-
-    listeningCb(port);
+    listeningCb(server.address().port);
   });
 
   return app;
