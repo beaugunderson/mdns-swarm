@@ -4,11 +4,11 @@ var bodyParser = require('body-parser');
 var debug = require('debug')('signal-server');
 var express = require('express');
 
-var app = express();
-
-app.use(bodyParser.json());
-
 exports.listen = function (me, listeningCb, signalCb) {
+  var app = express();
+
+  app.use(bodyParser.json());
+
   app.get('/connectivity', function (req, res) {
     debug('← GET /connectivity');
 
