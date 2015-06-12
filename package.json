@@ -1,6 +1,6 @@
 {
   "name": "mdns-swarm",
-  "version": "5.0.0",
+  "version": "5.1.0",
   "description": "Create a swarm of p2p connections using mDNS",
   "main": "mdns-swarm.js",
   "scripts": {
