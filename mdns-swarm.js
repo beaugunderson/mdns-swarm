@@ -4,7 +4,7 @@ var async = require('async');
 var cuid = require('cuid');
 var debug = require('debug');
 var events = require('events');
-var ip = require('ipv6');
+var ip = require('ip-address');
 var once = require('once');
 var request = require('request');
 var Service = require('./dns-sd.js').Service;
@@ -110,8 +110,10 @@ function Swarm(identifier, channel, simplePeerOptions) {
     }
   });
 
-  this.advertise();
-  this.browse();
+  this.service.initialize(function () {
+    self.advertise();
+    self.browse();
+  });
 }
 
 util.inherits(Swarm, events.EventEmitter);

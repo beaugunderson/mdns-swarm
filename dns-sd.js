@@ -1,15 +1,17 @@
 'use strict';
 
 var debug = require('debug');
+var mainDebug = require('debug')('dns-sd');
 var events = require('events');
-var ip = require('ipv6');
+var ip = require('ip-address');
 var multicastdns = require('multicast-dns');
+var network = require('network');
 var os = require('os');
 var util = require('util');
 var _ = require('lodash');
 
-var ADVERTISE_INTERVAL = 10 * 1000;
-var QUERY_INTERVAL = 10 * 1000;
+var ADVERTISE_INTERVAL = 4.9 * 1000;
+var QUERY_INTERVAL = 4.9 * 1000;
 
 // TODO: sort these based on local -> remote?
 function getAddresses(hostname) {
@@ -39,14 +41,31 @@ function getAddresses(hostname) {
 
     var v6 = new ip.v6.Address(address.address);
 
-    return v6.isValid() && v6.getScope() === 'Global';
+    return v6.isValid() &&
+      (v6.getScope() === 'Global' || v6.getScope() === 'Reserved');
   }).map(function (address) {
     return {
       name: hostname,
       type: 'AAAA',
       data: address.address
     };
+  }).sort(function (a, b) {
+    // Prioritize link-local unicast addresses first
+    var x = a.data;
+    var y = b.data;
+
+    if (x.indexOf('fe80') === 0) {
+      x = ' ' + x;
+    }
+
+    if (y.indexOf('fe80') === 0) {
+      y = ' ' + y;
+    }
+
+    return x.localeCompare(y);
   });
+
+  mainDebug('addresses6 %j', addresses6);
 
   return addresses6.concat(addresses4);
 }
@@ -61,29 +80,62 @@ function Service(name) {
 
   this.mdnsName = '_' + name + '._tcp.local';
   this.mdnsHostname = this.hostname + '.' + this.mdnsName;
+}
 
-  this.mdns4 = multicastdns();
-  // XXX: specifying the address scope is not optional
-  this.mdns6 = multicastdns({type: 'udp6', ip: 'ff02::fb%en0'});
+util.inherits(Service, events.EventEmitter);
 
+Service.prototype.initialize = function (cb) {
   var self = this;
-
-  function warning(err) {
-    self.debug('multicast-dns error: %j', err);
-  }
-
-  this.mdns4.on('warning', warning);
-  this.mdns6.on('warning', warning);
 
   function ready() {
     self.debug('multicast-dns ready');
   }
 
-  this.mdns4.on('ready', ready);
-  this.mdns6.on('ready', ready);
-}
+  function warning(err) {
+    self.debug('multicast-dns warning: %j', err);
+  }
 
-util.inherits(Service, events.EventEmitter);
+  this.mdns4 = multicastdns();
+
+  this.mdns4.on('warning', warning);
+  this.mdns4.on('ready', ready);
+
+  // TODO: allow overriding
+  // TODO: different module for this?
+  network.get_active_interface(function (err, activeInterface) {
+    if (err) {
+      self.debug('failed to find active network interface');
+
+      return cb();
+    }
+
+    var activeAddresses = os.networkInterfaces()[activeInterface.name]
+      .filter(function (address) {
+        return address.family === 'IPv6';
+      });
+
+    if (!activeAddresses.length) {
+      self.debug('failed to find IPv6 address for interface %s',
+        activeInterface.name);
+
+      return cb();
+    }
+
+    self.debug('using IPv6 interface "%s" and address "%s"',
+      activeAddresses[0].address, activeInterface.name);
+
+    self.mdns6 = multicastdns({
+      type: 'udp6',
+      interface: activeAddresses[0].address + '%' + activeInterface.name,
+      ip: 'ff02::fb%' + activeInterface.name
+    });
+
+    self.mdns6.on('warning', warning);
+    self.mdns6.on('ready', ready);
+
+    cb();
+  });
+};
 
 Service.prototype.browse = function () {
   var self = this;
@@ -179,12 +231,14 @@ Service.prototype.advertise = function (port, data) {
       })
       .join('');
 
+    var hostname = self.hostname.replace(/\.local$/, '') + '.local';
+
     var packet = {
       answers: [{
         name: self.mdnsHostname,
         type: 'SRV',
         data: {
-          target: self.hostname + '.local',
+          target: hostname,
           port: port
         }
       }, {
@@ -200,7 +254,7 @@ Service.prototype.advertise = function (port, data) {
         type: 'PTR',
         data: self.mdnsName
       }],
-      additionals: getAddresses(self.hostname + '.local')
+      additionals: getAddresses(hostname)
     };
 
     function cb() {
@@ -229,7 +283,7 @@ Service.prototype.advertise = function (port, data) {
   }
 
   this.mdns4.on('query', onQuery);
-  // this.mdns6.on('query', onQuery);
+  this.mdns6.on('query', onQuery);
 
   advertise();
 
